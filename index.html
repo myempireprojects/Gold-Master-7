@@ -638,14 +638,18 @@ input[type=range]::-webkit-slider-thumb{
   </div>
   <div class="drawer-body">
     <div class="settings-section">
-      <div class="settings-section-title">Twelve Data API Connection</div>
+      <div class="settings-section-title">Live Feed — Deriv WebSocket</div>
       <div class="demo-notice">
-        <strong>🟡 DEMO MODE ACTIVE</strong>
-        Trading with simulated funds on live XAU/USD market data via Twelve Data.
-        Get a free API key at twelvedata.com, paste it below, then click Connect.
+        <strong>✅ DERIV FEED ACTIVE</strong>
+        Live XAU/USD bid/ask ticks stream free from Deriv WebSocket (frxXAUUSD).
+        No API key required — click Connect to start.
       </div>
-      <input class="tinput" id="tdApiKey" type="password" placeholder="Twelve Data API Key"/>
       <button class="btn btn-auth" id="authBtn" style="margin-top:8px">Connect</button>
+      <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <div class="settings-section-title" style="margin-bottom:8px">Twelve Data API Key <span style="color:var(--text3);font-weight:400">(optional — historical backfill)</span></div>
+        <input class="tinput" id="tdApiKey" type="password" placeholder="Paste key for historical candle backfill"/>
+        <div class="field-hint">If provided, M1/M5/M15 history loads from Twelve Data on connect. Not required for live trading.</div>
+      </div>
     </div>
     <div class="settings-section">
       <div class="settings-section-title">BUY Setup — M5 HTF → M1 Confirm + Execute</div>
@@ -1017,15 +1021,22 @@ input[type=range]::-webkit-slider-thumb{
 //  CHRONOLOGICAL ORDER: bars processed strictly index+1 after index; no
 //  look-back into future indices. Scrub/fast-forward uses the same pipeline.
 // ════════════════════════════════════════════════════════════════════════════
-// ── TWELVE DATA CONFIG ──
+// ── TWELVE DATA CONFIG (kept for optional historical backfill) ──
 const TD_SYMBOL     = 'XAU/USD';
 const TD_BASE       = 'https://api.twelvedata.com';
 let   TD_API_KEY    = '';          // populated from Setup input
 
-let _tdPollTimer  = null;         // setInterval handle for live price polling
-let _tdPollActive = false;
-let _localWS      = null;         // WebSocket handle — local Python candle server
-let _wsConnected  = false;
+// ── DERIV WEBSOCKET CONFIG ──
+const DERIV_APP_ID = 1089;        // public demo app_id — register at deriv.com for production
+const DERIV_WS_URL = `wss://ws.binaryws.com/websockets/v3?app_id=${DERIV_APP_ID}`;
+const DERIV_SYMBOL = 'frxXAUUSD'; // Deriv symbol for spot Gold / USD
+
+let _tdPollTimer         = null;  // setInterval handle for TD polling (fallback only)
+let _tdPollActive        = false;
+let _localWS             = null;  // WebSocket handle — local Python candle server
+let _wsConnected         = false;
+let _derivWS             = null;  // WebSocket handle — Deriv live feed
+let _derivReconnectTimer = null;
 
 const CFG = {
   RISK_PCT     : 1.0,
@@ -3924,49 +3935,155 @@ function _wsConnect() {
   });
 }
 
-// ── Start Twelve Data live feed (replaces OANDA streaming connect) ──
+// ── DERIV LIVE FEED ENGINE ──────────────────────────────────────────────────
+// Priority chain: local Python server (port 8765) → Deriv WebSocket → TD poll
+//
+// Deriv provides true tick-by-tick bid/ask on frxXAUUSD at no cost.
+// Historical candles are fetched via the ticks_history request on connect.
+
+function _connectDeriv() {
+  if (_derivWS) { try { _derivWS.close(); } catch(_) {} _derivWS = null; }
+  if (_derivReconnectTimer) { clearTimeout(_derivReconnectTimer); _derivReconnectTimer = null; }
+
+  addSignal('info', '🔌 Connecting to Deriv WebSocket…', null);
+  setConn('wait');
+
+  const ws = new WebSocket(DERIV_WS_URL);
+  _derivWS = ws;
+
+  ws.onopen = () => {
+    setConn('on');
+    authed = true;
+    addSignal('info', '✓ Deriv connected — XAUUSD live tick feed active', null);
+    // Load historical OHLC bars for all three timeframes
+    _derivRequestHistory(ws, 60,  500);
+    _derivRequestHistory(ws, 300, 200);
+    _derivRequestHistory(ws, 900, 100);
+    // Subscribe to real-time bid/ask ticks
+    ws.send(JSON.stringify({ ticks: DERIV_SYMBOL, subscribe: 1 }));
+  };
+
+  ws.onmessage = evt => {
+    try { _handleDerivMsg(JSON.parse(evt.data)); } catch(_) {}
+  };
+
+  ws.onclose = () => {
+    _derivWS = null;
+    setConn('wait');
+    addSignal('warn', '⚠ Deriv disconnected — reconnecting in 5 s…', null);
+    _derivReconnectTimer = setTimeout(_connectDeriv, 5000);
+  };
+
+  ws.onerror = () => {
+    // onclose will fire immediately after — let it handle the reconnect
+  };
+}
+
+function _derivRequestHistory(ws, granularity, count) {
+  ws.send(JSON.stringify({
+    ticks_history  : DERIV_SYMBOL,
+    adjust_start_time: 1,
+    count,
+    end            : 'latest',
+    granularity,
+    start          : 1,
+    style          : 'candles',
+  }));
+}
+
+function _handleDerivMsg(msg) {
+  // Surface any API-level errors
+  if (msg.error) {
+    addSignal('warn', `Deriv: ${msg.error.message}`, null);
+    return;
+  }
+
+  // ── Real-time tick ──────────────────────────────────────────────
+  if (msg.msg_type === 'tick' && msg.tick) {
+    const t   = msg.tick;
+    const newBid = +(t.bid   || t.quote);
+    const newAsk = +(t.ask   || t.quote);
+    const newMid = (newBid + newAsk) / 2;
+    const epochSec = t.epoch;
+
+    if (mid && newMid !== mid) {
+      const diff = newMid - mid, dir = diff > 0 ? 'up' : 'dn';
+      const chgEl = $('priceChg');
+      chgEl.textContent = `${diff > 0 ? '+' : ''}${diff.toFixed(2)}`;
+      chgEl.className   = `price-chg ${dir}`;
+      flashPrice(dir);
+    }
+    bid = newBid; ask = newAsk;
+    prevMid = mid; mid = newMid;
+    $('priceMain').textContent = mid.toFixed(2);
+    updatePriceBadges(bid, ask);
+
+    _processTick(newMid, epochSec);
+    checkDemoPositions();
+    if (!replay.active) runStrategy();
+  }
+
+  // ── Historical candle batch ─────────────────────────────────────
+  if (msg.msg_type === 'candles' && msg.candles) {
+    const gran = msg.echo_req && +msg.echo_req.granularity;
+    if (!gran || !candles[gran]) return;
+    const arr = msg.candles.map(c => ({
+      epoch: +c.epoch,
+      open : +c.open,
+      high : +c.high,
+      low  : +c.low,
+      close: +c.close,
+    }));
+    if (arr.length) {
+      candles[gran] = arr;
+      const label = gran === 60 ? '1min' : gran === 300 ? '5min' : '15min';
+      addSignal('info', `✓ ${arr.length} ${label} candles loaded from Deriv`, null);
+      drawChart();
+    }
+  }
+
+  // ── Live OHLC candle update (from candle subscription if active) ─
+  if (msg.msg_type === 'ohlc' && msg.ohlc) {
+    const o    = msg.ohlc;
+    const gran = +o.granularity;
+    const arr  = candles[gran];
+    if (!arr) return;
+    const bar = {
+      epoch: +o.open_time,
+      open : +o.open,
+      high : +o.high,
+      low  : +o.low,
+      close: +o.close,
+    };
+    const last = arr.length ? arr[arr.length - 1] : null;
+    if (last && last.epoch === bar.epoch) {
+      arr[arr.length - 1] = bar;
+    } else if (!last || bar.epoch > last.epoch) {
+      arr.push(bar);
+      const cap = gran === 60 ? 501 : gran === 300 ? 201 : 101;
+      if (arr.length > cap) arr.shift();
+    }
+  }
+}
+
+// ── PRIMARY CONNECT — priority: local Python → Deriv → TD (legacy fallback) ──
 async function connect() {
-  // Stop any existing poll or WebSocket
+  // Tear down any existing connections cleanly
   if (_tdPollTimer) { clearInterval(_tdPollTimer); _tdPollTimer = null; }
   _tdPollActive = false;
   if (_localWS) { _localWS.close(); _localWS = null; _wsConnected = false; }
+  if (_derivWS) { try { _derivWS.close(); } catch(_) {} _derivWS = null; }
+  if (_derivReconnectTimer) { clearTimeout(_derivReconnectTimer); _derivReconnectTimer = null; }
   setConn('wait');
 
-  // ── Try local Python candle server first (ws://localhost:8765) ──
+  // 1️⃣  Local Python candle server (ws://localhost:8765)
   const wsOk = await _wsConnect();
-  if (wsOk) {
-    // Server found — load historical bars via TD if an API key is available
-    if (TD_API_KEY) {
-      addSignal('info', '📊 Loading historical candles from Twelve Data…', null);
-      await _fetchTDHistory();
-    }
-    return;   // live feed is now driven by WebSocket ticks
-  }
+  if (wsOk) return;
 
-  // ── Fallback: Twelve Data polling every 10 s ──────────────────
-  addSignal('info', '↩ No local server found — using Twelve Data polling (10 s)', null);
-
-  if (!TD_API_KEY) {
-    addSignal('warn', 'Twelve Data API key not set — enter it in Setup, then click Connect.', null);
-    setConn('disconnected');
-    return;
-  }
-
-  const ok = await _fetchTDHistory();
-  if (!ok) {
-    addSignal('warn', 'TD: could not load candle history — check your API key.', null);
-    setConn('disconnected');
-    return;
-  }
-
-  setConn('on');
-  authed = true;
-  _tdPollActive = true;
-  addSignal('info', 'Connected to Twelve Data — XAU/USD live feed active (polling every 10 s)', null);
-
-  await _tdPollOnce();
-  _tdPollTimer = setInterval(() => { if (_tdPollActive) _tdPollOnce(); }, 10000);
+  // 2️⃣  Deriv WebSocket — free, tick-level XAUUSD feed
+  _connectDeriv();
 }
+
 
 // ── CONTINUATION EVALUATION ENGINE ──
 // After a TP, scores whether conditions are strong enough to re-enter immediately,
@@ -5619,8 +5736,8 @@ setInterval(() => {
   });
 }, 60 * 1000);
 
-addSignal('info','XAUUSD PA Bot — Twelve Data feed engine ready.',null);
-addSignal('info','Enter your Twelve Data API key in Setup, then click Connect to start the live feed.',null);
+addSignal('info','XAUUSD PA Bot — Deriv WebSocket feed engine ready.',null);
+addSignal('info','Connecting to Deriv (frxXAUUSD) — free tick feed, no API key required.',null);
 addSignal('info','Strategy: M5 HTF bias → M1 confirmation + execution. M15 provides EQ reference only. All M1 setups require M5 structural alignment.',null);
 </script>
 </body>
