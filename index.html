@@ -1133,67 +1133,65 @@ const LEVERAGE          = 2000;
 const MAX_SPREAD_NORMAL = 100;  // 1.00 pts — Deriv frxXAUUSD can spike to 120pts; block above $1.00
 const MAX_SPREAD_NEWS   = 80;   // 0.80 pts — tighter block around news events
 
-// ── MARKET SIMULATION ENGINE — Exness Standard Account XAUUSD ──
-// Calibrated to real Exness Standard spread data (0.13–0.25 typical)
+// ── MARKET SIMULATION ENGINE — Deriv frxXAUUSD ──
+// Calibrated to real Deriv XAUUSD spread data (0.18–0.55 typical, spikes to 1.10+ on news)
 const SIM = {
-  // Spread simulation (XAUUSD points) — Exness Standard Account
-  SPREAD_BASE        : 0.13,   // tightest (NY/London overlap 13-15 UTC)
-  SPREAD_ASIAN_ADD   : 0.08,   // added 00-06 UTC (thin Asian liquidity)
-  SPREAD_PRENY_ADD   : 0.07,   // added 20-00 UTC (late NY wind-down)
-  SPREAD_VOLATILE_ADD: 0.18,   // added on elevated recent ATR
-  SPREAD_NEWS_HIGH   : 1.50,   // brief spike floor during HIGH-impact release window
-  SPREAD_NEWS_MED    : 0.55,   // slight widening during MEDIUM-impact
-  SPREAD_NEWS_LOW    : 0.25,   // minimal widening during LOW-impact
-  // Slippage — Exness Standard executes near-instantly, minimal slippage
+  // Spread simulation (XAUUSD pts) — Deriv frxXAUUSD
+  SPREAD_BASE        : 0.20,   // tightest baseline (NY/London overlap)
+  SPREAD_ASIAN_ADD   : 0.30,   // added 00-06 UTC (thin Deriv liquidity, much wider)
+  SPREAD_PRENY_ADD   : 0.18,   // added 20-00 UTC (late NY wind-down)
+  SPREAD_VOLATILE_ADD: 0.25,   // added on elevated recent ATR
+  SPREAD_NEWS_HIGH   : 1.10,   // spike floor during HIGH-impact release window
+  SPREAD_NEWS_MED    : 0.55,   // widening during MEDIUM-impact
+  SPREAD_NEWS_LOW    : 0.30,   // minimal widening during LOW-impact
+  // Slippage — Deriv synthetic feed, minimal slippage
   SLIP_MIN           : 0.00,
-  SLIP_MAX           : 0.12,   // 0.00–0.12 pts, rarely above 0.10 on Standard
-  // Execution latency — Exness Standard fast execution (ms)
+  SLIP_MAX           : 0.12,
+  // Execution latency (ms)
   DELAY_MIN          : 50,
-  DELAY_MAX          : 150,
+  DELAY_MAX          : 200,
 };
 
-// ── DYNAMIC SPREAD — Exness Standard Account XAUUSD ──
-// Session profile calibrated to actual Exness spread data:
-// Asian 00-06: ~0.18-0.25  |  Pre-London 06-07: ~0.18-0.22
-// London open 07-09: ~0.13-0.18 (tight)  |  London mid 09-13: ~0.15-0.20
-// NY/London overlap 13-15: ~0.13-0.16 (tightest)  |  NY afternoon 15-20: ~0.16-0.22
-// Late NY 20-00: ~0.20-0.30
+// ── DYNAMIC SPREAD — Deriv frxXAUUSD ──
+// Session profile calibrated to actual Deriv spread data:
+// Dead Asian 00-03: ~0.55–0.70  |  Late Asian 03-06: ~0.42–0.54
+// Pre-London 06-07: ~0.35–0.45  |  London open 07-09: ~0.22–0.30
+// London mid 09-13: ~0.25–0.33  |  NY/LON overlap 13-15: ~0.18–0.25 (tightest)
+// NY afternoon 15-20: ~0.30–0.40  |  Late NY 20-00: ~0.40–0.52
 function getDynamicSpread(epochSec, newsState) {
   const epochMs = epochSec ? epochSec * 1000 : Date.now();
   const hour = new Date(epochMs).getUTCHours();
-  let spread = SIM.SPREAD_BASE;
+  let spread;
 
-  // Session-based widening — calibrated to Exness Standard XAUUSD
-  if      (hour >= 0  && hour < 3 ) spread += SIM.SPREAD_ASIAN_ADD + 0.05;  // dead Asian (00-03): +0.13
-  else if (hour >= 3  && hour < 6 ) spread += SIM.SPREAD_ASIAN_ADD;          // late Asian (03-06): +0.08
-  else if (hour >= 6  && hour < 7 ) spread += 0.05;                           // pre-London (06-07): +0.05
-  else if (hour >= 7  && hour < 9 ) spread += 0.02;                           // London open (07-09): +0.02 (tight)
-  else if (hour >= 9  && hour < 13) spread += 0.04;                           // London mid (09-13): +0.04
-  else if (hour >= 13 && hour < 15) spread -= 0.02;                           // NY/London overlap (13-15): -0.02 (tightest ~0.11)
-  else if (hour >= 15 && hour < 20) spread += 0.05;                           // NY afternoon (15-20): +0.05
-  else if (hour >= 20             ) spread += SIM.SPREAD_PRENY_ADD;           // late NY (20-00): +0.07
+  // Session-based spread — calibrated to Deriv frxXAUUSD
+  if      (hour >= 0  && hour < 3 ) spread = 0.55 + Math.random() * 0.15; // dead Asian (00-03): 0.55–0.70
+  else if (hour >= 3  && hour < 6 ) spread = 0.42 + Math.random() * 0.12; // late Asian (03-06): 0.42–0.54
+  else if (hour >= 6  && hour < 7 ) spread = 0.35 + Math.random() * 0.10; // pre-London (06-07): 0.35–0.45
+  else if (hour >= 7  && hour < 9 ) spread = 0.22 + Math.random() * 0.08; // London open (07-09): 0.22–0.30
+  else if (hour >= 9  && hour < 13) spread = 0.25 + Math.random() * 0.08; // London mid  (09-13): 0.25–0.33
+  else if (hour >= 13 && hour < 15) spread = 0.18 + Math.random() * 0.07; // NY/LON overlap tightest: 0.18–0.25
+  else if (hour >= 15 && hour < 20) spread = 0.30 + Math.random() * 0.10; // NY afternoon (15-20): 0.30–0.40
+  else                               spread = 0.40 + Math.random() * 0.12; // late NY (20-00): 0.40–0.52
 
-  // Volatility widening — Exness widens modestly, not dramatically
+  // Volatility widening — Deriv widens more aggressively than Exness
   const m1 = candles[60];
   if (m1.length >= 5) {
     const recent = m1.slice(-5);
     const avgRange = recent.reduce((s, c) => s + c.high - c.low, 0) / 5;
-    if      (avgRange > 15) spread += SIM.SPREAD_VOLATILE_ADD;         // very high vol: +0.18
-    else if (avgRange > 8 ) spread += SIM.SPREAD_VOLATILE_ADD * 0.55;  // elevated: +0.10
-    else if (avgRange > 4 ) spread += SIM.SPREAD_VOLATILE_ADD * 0.22;  // moderate: +0.04
+    if      (avgRange > 15) spread += SIM.SPREAD_VOLATILE_ADD;
+    else if (avgRange > 8 ) spread += SIM.SPREAD_VOLATILE_ADD * 0.55;
+    else if (avgRange > 4 ) spread += SIM.SPREAD_VOLATILE_ADD * 0.22;
   }
 
-  // News-driven floor — brief spikes only, Exness Standard recovers quickly
+  // News-driven floor — Deriv spikes to 1.10–1.30 during releases
   const ns = newsState || (typeof newsEngine !== 'undefined' ? newsEngine.state : 'NORMAL');
-  if      (ns === 'PRE_RELEASE') spread = Math.max(spread, SIM.SPREAD_NEWS_HIGH);  // ~1.50 spike at release
-  else if (ns === 'AWARE'      ) spread = Math.max(spread, SIM.SPREAD_NEWS_MED);   // ~0.55 approaching news
-  else if (ns === 'DEFENSIVE'  ) spread = Math.max(spread, SIM.SPREAD_NEWS_HIGH);  // legacy compat
-  else if (ns === 'CAUTION'    ) spread = Math.max(spread, SIM.SPREAD_NEWS_MED);   // legacy compat
-  else if (ns === 'LOW'        ) spread = Math.max(spread, SIM.SPREAD_NEWS_LOW);   // legacy compat
+  if      (ns === 'PRE_RELEASE') spread = Math.max(spread, SIM.SPREAD_NEWS_HIGH);
+  else if (ns === 'AWARE'      ) spread = Math.max(spread, SIM.SPREAD_NEWS_MED);
+  else if (ns === 'DEFENSIVE'  ) spread = Math.max(spread, SIM.SPREAD_NEWS_HIGH);
+  else if (ns === 'CAUTION'    ) spread = Math.max(spread, SIM.SPREAD_NEWS_MED);
+  else if (ns === 'LOW'        ) spread = Math.max(spread, SIM.SPREAD_NEWS_LOW);
 
-  // Tiny random tick noise ±0.03 (Exness has very stable spreads)
-  spread += (Math.random() - 0.5) * 0.06;
-  return Math.max(0.10, +spread.toFixed(2));
+  return Math.max(0.18, +spread.toFixed(2));
 }
 
 // ── LIVE SPREAD — uses real Deriv bid/ask, overlays news widening ──
@@ -3802,7 +3800,7 @@ async function _tdPollOnce() {
     // Dynamic session-aware spread — calibrated to Deriv frxXAUUSD real data
     // (flat 0.20 was too optimistic; Deriv can spike to 1.20+ during news/thin sessions)
     const _btHour = new Date(forming.datetime.replace(' ', 'T') + 'Z').getUTCHours();
-    const _btNs   = newsEngine ? newsEngine.getState() : 'NORMAL';
+    const _btNs   = (typeof newsEngine !== 'undefined' && newsEngine.state) ? newsEngine.state : 'NORMAL';
     let spread;
     if      (_btNs === 'PRE_RELEASE' || _btNs === 'DEFENSIVE') spread = 1.10 + Math.random() * 0.20; // news spike: 1.10–1.30
     else if (_btNs === 'AWARE'       || _btNs === 'CAUTION'  ) spread = 0.55 + Math.random() * 0.15; // pre-news:  0.55–0.70
