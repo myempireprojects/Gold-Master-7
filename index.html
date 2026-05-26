@@ -856,7 +856,7 @@ input[type=range]::-webkit-slider-thumb{
       <div class="field">
         <div style="background:var(--bg3);border:1px solid var(--border2);border-radius:4px;padding:9px 12px;font-size:9px;color:var(--text2);line-height:1.8">
           <span style="color:var(--gold);font-family:var(--sans);font-size:9px;font-weight:700;display:block;margin-bottom:3px">XAUUSD · Exness Standard Account</span>
-          Spread: 0.10–0.25 pts typical · Asian: ~0.20 · NY/LON overlap: ~0.11<br>
+          Spread: 0.18–0.55 pts typical · Asian: ~0.50 · NY/LON overlap: ~0.20 · News spike: ~1.10–1.30<br>
           Slippage: 0.00–0.12 pts · Execution: 50–150 ms · Leverage: 1:2000<br>
           News: trades all events · lots adjust ×0.60–×1.20 by impact/timing
         </div>
@@ -902,7 +902,7 @@ input[type=range]::-webkit-slider-thumb{
     <div class="bt-summary-note">
       Replays your strategy on real historical XAUUSD data. Uses identical ICT/BMS rules, session filters, and risk management as live mode — no data advantage, no repainting. M5 HTF bias → M1 execution. Trades appear live on the chart during replay.<br><br>
       <span style="color:var(--gold);font-family:var(--sans);font-size:8px;font-weight:700;letter-spacing:.08em">EXNESS STANDARD SIMULATION ACTIVE:</span><br>
-      📰 News-aware trading (ALL news types traded · lots ×0.60 at release · ×1.20 post-release) · Spread: 0.10–0.25 typical · Slippage: 0.00–0.12 pts · Execution: 50–150 ms
+      📰 News-aware trading (ALL news types traded · lots ×0.60 at release · ×1.20 post-release) · Spread: 0.18–0.55 typical · News spike: ~1.10–1.30 · Slippage: 0.00–0.12 pts · Execution: 50–150 ms
     </div>
     <div class="settings-section">
       <div class="settings-section-title">Date Range (DD-MM-YYYY)</div>
@@ -1130,8 +1130,8 @@ function resizeCV() {
 // ── UNIVERSAL SPREAD & LEVERAGE ──
 const XAUUSD_SPREAD     = 0.30;   // baseline reference only — getDynamicSpread() used for execution
 const LEVERAGE          = 2000;
-const MAX_SPREAD_NORMAL = 80;  // 0.80 pts — matches Python engine MAX_SPREAD
-const MAX_SPREAD_NEWS   = 60;
+const MAX_SPREAD_NORMAL = 100;  // 1.00 pts — Deriv frxXAUUSD can spike to 120pts; block above $1.00
+const MAX_SPREAD_NEWS   = 80;   // 0.80 pts — tighter block around news events
 
 // ── MARKET SIMULATION ENGINE — Exness Standard Account XAUUSD ──
 // Calibrated to real Exness Standard spread data (0.13–0.25 typical)
@@ -1193,6 +1193,23 @@ function getDynamicSpread(epochSec, newsState) {
 
   // Tiny random tick noise ±0.03 (Exness has very stable spreads)
   spread += (Math.random() - 0.5) * 0.06;
+  return Math.max(0.10, +spread.toFixed(2));
+}
+
+// ── LIVE SPREAD — uses real Deriv bid/ask, overlays news widening ──
+// Called only in live-trading paths (entry pricing, PnL calc, spread display).
+// getDynamicSpread() remains the backtest-only simulation.
+function getLiveSpread(newsState) {
+  // Real market spread from Deriv feed; fall back to session estimate if not yet connected
+  const mktSpread = (ask && bid && ask > bid) ? (ask - bid) : SIM.SPREAD_BASE;
+  const ns = newsState || (typeof newsEngine !== 'undefined' ? newsEngine.state : 'NORMAL');
+  let spread = mktSpread;
+  // News floor: brief widening during high-impact windows only
+  if      (ns === 'PRE_RELEASE') spread = Math.max(spread, SIM.SPREAD_NEWS_HIGH);
+  else if (ns === 'AWARE'      ) spread = Math.max(spread, SIM.SPREAD_NEWS_MED);
+  else if (ns === 'DEFENSIVE'  ) spread = Math.max(spread, SIM.SPREAD_NEWS_HIGH);
+  else if (ns === 'CAUTION'    ) spread = Math.max(spread, SIM.SPREAD_NEWS_MED);
+  else if (ns === 'LOW'        ) spread = Math.max(spread, SIM.SPREAD_NEWS_LOW);
   return Math.max(0.10, +spread.toFixed(2));
 }
 
@@ -1314,7 +1331,9 @@ function btNewsStateAt(epochSec, events) {
 function calcPnLForPos(pos, currentMid) {
   if(!currentMid || !pos.entry || !pos.slPrice) return 0;
   const isBuy = pos.dir === 'UP';
-  const effectivePrice = isBuy ? currentMid - XAUUSD_SPREAD / 2 : currentMid + XAUUSD_SPREAD / 2;
+  // Use real live spread (Deriv bid/ask) so floating PnL matches actual fill costs
+  const halfSpread = (ask && bid && ask > bid) ? (ask - bid) / 2 : XAUUSD_SPREAD / 2;
+  const effectivePrice = isBuy ? currentMid - halfSpread : currentMid + halfSpread;
   const delta = isBuy ? (effectivePrice - pos.entry) : (pos.entry - effectivePrice);
   return delta * (pos.posUnits || pos.lots * 100 || 1);
 }
@@ -2725,7 +2744,7 @@ function setConn(state) {
 }
 
 function updatePriceBadges(b, a) {
-  const sp = ((a-b)*10000).toFixed(0);
+  const sp = Math.round((a - b) * 100);   // XAUUSD: 2dp → pts = difference × 100
   if($('tBid')) $('tBid').textContent=b.toFixed(2);
   if($('tAsk')) $('tAsk').textContent=a.toFixed(2);
   if($('tSpread')) $('tSpread').textContent=sp;
@@ -3093,7 +3112,7 @@ const newsEngine = {
   },
 
   spreadLimit() { return MAX_SPREAD_NORMAL; }, // always same limit — no news block
-  liveSpreadPts() { if (!bid || !ask) return 0; return Math.round((ask - bid) / 0.01); },
+  liveSpreadPts() { if (!bid || !ask) return 0; return Math.round((ask - bid) * 100); },  // pts = diff × 100 for XAUUSD 2dp
   spreadOk() { return this.liveSpreadPts() <= this.spreadLimit(); },
 };
 
@@ -3156,8 +3175,8 @@ function _executeDemoTrade(dir, ob, quality = 1) {
   if(!gate.ok) return;
 
   const isBuy = dir === 'UP';
-  // ── DYNAMIC SPREAD ──
-  const dynSpread = getDynamicSpread(null, newsEngine.state);
+  // ── LIVE SPREAD — real bid/ask from Deriv + news overlay ──
+  const dynSpread = getLiveSpread(newsEngine.state);
   // ── SLIPPAGE ──
   const slip = getSlippage(isBuy);
   const entryPrice = +(isBuy
@@ -3780,8 +3799,22 @@ async function _tdPollOnce() {
     const closePrice = parseFloat(forming.close);
     if (!closePrice) return;
 
-    // Simulate bid/ask with a realistic 0.20 pt spread
-    const spread = 0.20;
+    // Dynamic session-aware spread — calibrated to Deriv frxXAUUSD real data
+    // (flat 0.20 was too optimistic; Deriv can spike to 1.20+ during news/thin sessions)
+    const _btHour = new Date(forming.datetime.replace(' ', 'T') + 'Z').getUTCHours();
+    const _btNs   = newsEngine ? newsEngine.getState() : 'NORMAL';
+    let spread;
+    if      (_btNs === 'PRE_RELEASE' || _btNs === 'DEFENSIVE') spread = 1.10 + Math.random() * 0.20; // news spike: 1.10–1.30
+    else if (_btNs === 'AWARE'       || _btNs === 'CAUTION'  ) spread = 0.55 + Math.random() * 0.15; // pre-news:  0.55–0.70
+    else if (_btHour >= 0  && _btHour < 3 ) spread = 0.55 + Math.random() * 0.15; // dead Asian (00-03): 0.55–0.70
+    else if (_btHour >= 3  && _btHour < 6 ) spread = 0.42 + Math.random() * 0.12; // late Asian (03-06): 0.42–0.54
+    else if (_btHour >= 6  && _btHour < 7 ) spread = 0.35 + Math.random() * 0.10; // pre-London (06-07): 0.35–0.45
+    else if (_btHour >= 7  && _btHour < 9 ) spread = 0.22 + Math.random() * 0.08; // London open (07-09): 0.22–0.30
+    else if (_btHour >= 9  && _btHour < 13) spread = 0.25 + Math.random() * 0.08; // London mid  (09-13): 0.25–0.33
+    else if (_btHour >= 13 && _btHour < 15) spread = 0.18 + Math.random() * 0.07; // NY/LON overlap tightest: 0.18–0.25
+    else if (_btHour >= 15 && _btHour < 20) spread = 0.30 + Math.random() * 0.10; // NY afternoon (15-20): 0.30–0.40
+    else                                     spread = 0.40 + Math.random() * 0.12; // late NY (20-00): 0.40–0.52
+    spread = +spread.toFixed(2);
     bid = closePrice - spread / 2;
     ask = closePrice + spread / 2;
     const newMid = (bid + ask) / 2;
